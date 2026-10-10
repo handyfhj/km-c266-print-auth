@@ -1,0 +1,106 @@
+#!/usr/bin/perl
+# CUPS backend: inject KM user-authentication PJL for KONICA MINOLTA bizhub C266
+# Device URI: km9100auth://<user>:<pass>@<host>[:port]
+# Reads the CUPS-filtered job on stdin (or argv[5]), strips the stale auth SETs
+# the KM driver emits (incl. KMCOETYPE=2, which flips the device into a mode it
+# rejects with "Login Error"), and inserts the plaintext auth block right after
+# @PJL JOB. Verified on this device: plaintext + no KMCOETYPE -> End (success).
+use strict;
+use warnings;
+use IO::Socket::INET;
+
+if (@ARGV == 0) {
+    print qq(direct km9100auth "Unknown" "KM bizhub TCP/9100 with PJL auth"\n);
+    exit 0;
+}
+if (@ARGV < 5) {
+    print STDERR "ERROR: usage: km9100auth job-id user title copies options [file]\n";
+    exit 1;
+}
+my $device_uri = $ENV{DEVICE_URI} // "";
+if ($device_uri eq "") {
+    print STDERR "ERROR: DEVICE_URI not set\n";
+    exit 1;
+}
+my ($user, $pass, $host, $port);
+if ($device_uri =~ m{^[a-zA-Z0-9]+://(?:([^:@/]*)(?::([^@/]*))?@)?([^:/]+)(?::(\d+))?}) {
+    ($user, $pass, $host, $port) = ($1, $2, $3, $4);
+}
+sub url_decode {
+    my ($s) = @_;
+    $s =~ s/\+/ /g;
+    $s =~ s/%([0-9A-Fa-f]{2})/chr(hex($1))/ge;
+    return $s;
+}
+$user = url_decode($user // "");
+$pass = url_decode($pass // "");
+# Strip control chars / quotes that would break PJL quoting
+for ($user, $pass) { s/[\x00-\x1f"]//g; }
+$host //= "";
+$port //= 9100;
+if ($user eq "" || $pass eq "" || $host eq "") {
+    print STDERR "ERROR: need km9100auth://user:pass\@host (got $device_uri)\n";
+    exit 1;
+}
+
+# Auth block for device user authentication (AuthType=Device, no account track).
+# Plaintext password works when KMCOETYPE is absent/0; KMCOETYPE=2 requires the
+# driver hash, which we cannot compute here, so we strip it and send plaintext.
+my $auth_block =
+    "\@PJL SET BOXHOLDTYPE = PRIVATE\n"
+    . "\@PJL SET KMUSERNAME = \"$user\" \n"
+    . "\@PJL SET KMUSERKEY2 = \"$pass\" \n"
+    . "\@PJL SET KMCERTSERVTYPE = NONE\n"
+    . "\@PJL SET KMCERTSIMPLEAUTHREQ = OFF\n";
+
+my $src;
+if (@ARGV >= 6 && defined $ARGV[5] && $ARGV[5] ne "") {
+    open($src, "<:raw", $ARGV[5]) or do {
+        print STDERR "ERROR: cannot open $ARGV[5]: $!\n"; exit 1;
+    };
+} else {
+    $src = \*STDIN;
+}
+binmode($src);
+my $data = do { local $/; <$src> };
+$data = "" unless defined $data;
+close($src) if $src != \*STDIN;
+
+# Strip stale auth SETs the upstream KM filter may have emitted
+my $strip = qr/^\@PJL SET (?:BOXHOLDTYPE|KMUSERNAME|KMUSERKEY2|KMCERTSERVTYPE|KMCERTSERVNUM|KMCERTSELECTTYPE|KMCERTSIMPLEAUTHREQ|KMCOETYPE) [^\n]*\n/m;
+my $out;
+my $enter_pos = index($data, "\@PJL ENTER LANGUAGE");
+if ($enter_pos >= 0) {
+    my $header = substr($data, 0, $enter_pos);
+    my $rest   = substr($data, $enter_pos);
+    $header =~ s/$strip//g;
+    if ($header =~ /(\@PJL JOB[^\n]*\n)/) {
+        my $job_line = $1;
+        $header =~ s/\Q$job_line\E/$job_line$auth_block/;
+    } else {
+        $header = "\x1b%-12345X\@PJL JOB\n" . $auth_block . $header;
+    }
+    $out = $header . $rest;
+} else {
+    $data =~ s/$strip//g;
+    if ($data =~ /(\@PJL JOB[^\n]*\n)/) {
+        my $job_line = $1;
+        $data =~ s/\Q$job_line\E/$job_line$auth_block/;
+        $out = $data;
+    } else {
+        $out = "\x1b%-12345X\@PJL JOB\n" . $auth_block
+            . "\@PJL ENTER LANGUAGE = POSTSCRIPT\n" . $data
+            . "\n\x1b%-12345X\@PJL EOJ\n\x1b%-12345X";
+    }
+}
+
+my $sock = IO::Socket::INET->new(
+    PeerAddr => $host, PeerPort => $port, Proto => "tcp", Timeout => 30,
+) or do { print STDERR "ERROR: cannot connect to $host:$port: $!\n"; exit 1; };
+binmode($sock);
+$sock->autoflush(1);
+print $sock $out;
+$sock->shutdown(1);
+$sock->close();
+print STDERR "INFO: sent " . length($out) . " bytes to $host:$port (auth user=$user)\n";
+exit 0;
