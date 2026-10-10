@@ -4,13 +4,23 @@
 #
 # 用法:
 #   交互式        : sudo ./install.sh [打印机名]
-#   非交互(脚本化) : sudo KM_HOST=192.168.88.8 KM_USER=用户名 KM_PASS=密码 ./install.sh [打印机名]
+#   非交互(脚本化) : sudo KM_HOST=192.168.88.8 KM_USER=用户名 KM_PASS=密码 ./install.sh 打印机名
 #
 # 前置条件: 打印机已在"系统设置 → 打印机"中添加并选用柯尼卡美能达 PPD
 set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
-PRINTER="${1:-$(lpstat -p 2>/dev/null | awk '/printer/{print $2; exit}')}"
-[ -n "$PRINTER" ] || { echo "用法: sudo $0 打印机名"; exit 1; }
+
+# ---------- 确定打印机名（参数优先，否则列出可选后交互输入） ----------
+if [ -n "$1" ]; then
+    PRINTER="$1"
+else
+    echo "已安装的打印机:"
+    lpstat -v 2>/dev/null \
+        | sed -E 's/^device for ([^:]*):.*/\1/; s/^用于(.*)的设备：.*/\1/' \
+        | sed 's/^ *//; s/ *$//' | grep -v '^$' | nl
+    read -r -p "请输入打印机名: " PRINTER
+fi
+[ -n "$PRINTER" ] || { echo "错误: 打印机名不能为空"; exit 1; }
 
 if [ "$(id -u)" != 0 ]; then
     echo "请用 sudo 运行: sudo $0 $PRINTER"
