@@ -179,6 +179,34 @@ lp -d <printer-name> test.txt     # check Result=End in device job history
 | New backend detection | Restart cupsd after installing (`launchctl kickstart -k system/com.apple.cupsd`) |
 | `lpstat -v` hides credentials | The display layer hides userinfo; the stored CUPS URI keeps them and the backend parses them fine |
 
+## Usage (Daily Printing)
+
+After installation, daily printing needs **no extra steps**:
+
+1. Press **Cmd + P** in any app to open the print dialog;
+2. Select the **printer pointed at the backend** (same name as at install time, e.g. `_192_168_88_8`);
+3. Click **Print** — **no username/password prompt** (credentials are embedded in the queue URI).
+
+> If System Settings → Printers auto-discovers and adds a new IPP queue, do not
+> select it (it will fail with LoginError). Delete the new queue and keep the
+> backend printer.
+
+**How to confirm the auth backend is in use**:
+
+- Run `lpstat -v <printer-name>` — the device URI starts with `km9100auth://`;
+- After printing, check the device Web Connection (`http://<ip>/wcd/`) → Job
+  History: Result=**End** with the UserName entered at install time means success.
+
+### FAQ
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| A username/password dialog appears at print time | You selected the auto-discovered IPP queue | Switch to the backend queue; delete the new queue |
+| Still "Login Error" | The queue was recreated as IPP by System Settings | Delete the new queue and keep the backend one; or rerun `sudo ./install.sh <printer-name>` |
+| Printer missing from the print dialog | The backend queue was disabled by CUPS | `cupsenable <printer-name>`; or rerun the installer |
+| Printing fails after a password change | The queue URI still holds the old password | Rerun `sudo ./install.sh <printer-name>` and enter the new password |
+| Jobs stall / fail immediately | Backend not effective (permissions / cupsd not restarted) | Verify `/usr/libexec/cups/backend/km9100auth` (root:wheel 0700) and restart cupsd, then retry |
+
 ## Verification (measured)
 
 Device job history on the test machine (traceable):
